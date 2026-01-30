@@ -1,3 +1,5 @@
+#Assignment 3. Emily Koopmans and Ollie Leal
+
 #scl yellow to pin 23, sda oragange pin 22
 #trip purp to pin 18, echo green to pin 5
 #Vio to pin 12
@@ -56,4 +58,5 @@ while True:
         time.sleep(0.1) #leave buzzer on for quick chirp then shutoff for sanity sake
         buzzer.value(1)
     time.sleep(1)
+
     
