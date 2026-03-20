@@ -1,16 +1,19 @@
-import uasyncio as asyncio
 from machine import Pin, I2C, ADC
-import time
+import i2c_lcd, time
+import asyncio
 import aioble
 from bt_esp32_api import BLE
-import i2c_lcd
 
-# ------------- BLE SETUP -------------
-
+# ==== BLE CONFIG ====
 SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214"
 SENSOR_TX_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214"
 
-# ------------- HARDWARE SETUP -------------
+# These three will be updated from the sensor code
+max_val = 2
+min_val = 1
+reading_val = 1.5
+
+# ==== SETUP (YOUR ORIGINAL CODE) ====
 
 # LCD
 screen = I2C(0, scl=Pin(22), sda=Pin(21))
@@ -30,11 +33,8 @@ button_last = button.value()
 button_last_change = time.ticks_ms()
 
 # LEDs
-led_b = Pin(13, Pin.OUT)   # above MAX / below MIN visual
-led_a = Pin(14, Pin.OUT)   # indicates "sending enabled"
-
-# Sending enable switch
-send_switch = Pin(27, Pin.IN, Pin.PULL_UP)  # external toggle
+led_b = Pin(13, Pin.OUT)   # above MAX
+led_a = Pin(14, Pin.OUT)   # below MIN
 
 # Thresholds
 MIN_val = 0       # dark limit
@@ -44,18 +44,17 @@ MAX_val = 4095    # bright limit
 mode = "MIN"
 last_b = Sw2.value()
 
-# Shared brightness for BLE
-current_brightness = 0
 
+# ==== FUNCTIONS (UNCHANGED LOGIC) ====
 
-# ------------- FUNCTIONS -------------
-
+# read lightsensor
 def read_brightness():
     raw = lightsensor.read()
     return 4095 - raw          # 0 = darkest, 4095 = brightest
 
-
+# check if encoder has moved and update mode and lcd
 def update_mode_and_lcd(last_b, mode):
+
     b = Sw2.value()
     if last_b == 1 and b == 0:
         a = Sw1.value()
@@ -70,19 +69,16 @@ def update_mode_and_lcd(last_b, mode):
     else:
         lcd.putstr(" MIN  [MAX] ")
 
-    return b, mode
+    return b, mode  # return to update for next loop
 
-
+# draw bar on 1-16 scale and update if max or min val is updated
 def draw_bar(MIN_val, MAX_val):
-    global current_brightness
-
-    brightness = read_brightness()
-    current_brightness = brightness
+    brightness = read_brightness()  # read level
 
     # LED on if outside range
     led_b.value(1 if brightness < MIN_val or brightness > MAX_val else 0)
 
-    # clamp brightness
+    # if value is outside range, set to max or min
     if brightness < MIN_val:
         brightness = MIN_val
     elif brightness > MAX_val:
@@ -90,82 +86,96 @@ def draw_bar(MIN_val, MAX_val):
 
     span = MAX_val - MIN_val or 1
 
+    # calculate how many bars to display
     position = (brightness - MIN_val) / span
     bars = int(position * 16)
 
+    # display bars and add spaces so they will clear as it updates
     bar_str = "-" * bars + " " * (16 - bars)
     lcd.move_to(0, 0)
     lcd.putstr(bar_str)
 
-
+# press button to store new min or max depending on the mode
 def change_level(button_last, button_last_change, mode, MIN_val, MAX_val):
     now = time.ticks_ms()
     val = button.value()
-    if val != button_last and time.ticks_diff(now, button_last_change) > 50:
+    if val != button_last and time.ticks_diff(now, button_last_change) > 50:  # debounce
         button_last_change = now
         button_last = val
         if val == 0:  # pressed
             brightness = read_brightness()
             if mode == "MIN":
-                MIN_val = brightness
+                MIN_val = brightness  # update min
             else:
-                MAX_val = brightness
+                MAX_val = brightness  # update max
 
     return button_last, button_last_change, MIN_val, MAX_val
 
 
-# ------------- ASYNC TASKS -------------
+# ==== ASYNC TASKS ====
 
-async def ui_task():
-    global last_b, mode, button_last, button_last_change, MIN_val, MAX_val
+async def ui_sensor_task():
+    """
+    This is your old while True loop rewritten as an async task.
+    It updates MIN_val, MAX_val, and reading_val so BLE can send them.
+    """
+    global last_b, mode
+    global button_last, button_last_change
+    global MIN_val, MAX_val
+    global max_val, min_val, reading_val
+
     while True:
         last_b, mode = update_mode_and_lcd(last_b, mode)
         button_last, button_last_change, MIN_val, MAX_val = change_level(
             button_last, button_last_change, mode, MIN_val, MAX_val
         )
         draw_bar(MIN_val, MAX_val)
+
+        # current brightness reading
+        brightness = read_brightness()
+        print(brightness)
+
+        # expose values to BLE task
+        max_val = MAX_val
+        min_val = MIN_val
+        reading_val = brightness
+
+        # small delay, but non-blocking
         await asyncio.sleep_ms(5)
 
 
 async def sensor_task(ble, period_ms=3000):
-    global MIN_val, MAX_val, current_brightness
+    """
+    Your original BLE sending loop, but now it reads the globals
+    max_val, min_val, reading_val that ui_sensor_task keeps updated.
+    """
+    global max_val, min_val, reading_val
 
     while True:
-        # Check switch
-        sending_enabled = send_switch.value() == 1  # active high
-        led_a.value(1 if sending_enabled else 0)
-
-        if sending_enabled:
-            # Construct payload from live values
-            max_val = MAX_val
-            min_val = MIN_val
-            reading_val = current_brightness
-
-            msg = f"{max_val},{min_val},{reading_val}".encode()
-            ble.send(msg)
-            print("BLE:", max_val, min_val, reading_val)
-
+        msg = f"{max_val},{min_val},{reading_val}".encode()
+        ble.send(msg)
+        print("BLE send:", max_val, min_val, reading_val)
         await asyncio.sleep_ms(period_ms)
 
 
 async def main():
-    # Start BLE
+    # BLE setup (your original main, plus starting the other task)
     ble = BLE(
         name='OLLIEESP32',
         service_uuid=SERVICE_UUID,
         tx_char_uuid=SENSOR_TX_UUID,
-        adv_interval_us=250_000
+        adv_interval_us=250_000  # 250ms
     )
+
     await ble.start_adv()
     print('BLE started, advertising...')
 
-    # Spawn tasks
-    ui = asyncio.create_task(ui_task())
-    sensor = asyncio.create_task(sensor_task(ble, period_ms=3000))
-
     try:
-        # Run forever
-        await asyncio.gather(ui, sensor)
+        # Run LCD/sensor loop and BLE sender concurrently
+        await asyncio.gather(
+            ui_sensor_task(),
+            sensor_task(ble, period_ms=3000),
+        )
     finally:
         await ble.stop()
         print('stopped')
