@@ -1,0 +1,35 @@
+import asyncio
+import aioble
+from bt_esp32_api import BLE
+
+SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214"
+SENSOR_TX_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214"
+
+max_val = 2
+min_val = 1
+reading_val = 1.5
+
+async def sensor_task(ble, period_ms=3000):
+    while True:
+        msg = f"{max_val},{min_val},{reading_val}".encode()
+        ble.send(msg)
+        print("sending:", msg)
+        await asyncio.sleep_ms(period_ms)
+
+async def main():
+    ble = BLE(
+        name="OLLIEESP32",
+        service_uuid=SERVICE_UUID,
+        tx_char_uuid=SENSOR_TX_UUID,
+        adv_interval_us=250_000,
+    )
+    await ble.start_adv()
+    print("BLE started, advertising...")
+
+    try:
+        await sensor_task(ble)
+    finally:
+        await ble.stop()
+        print("stopped")
+
+asyncio.run(main())
